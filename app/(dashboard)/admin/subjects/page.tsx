@@ -1,0 +1,285 @@
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
+import { useForm, useWatch } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Plus, Pencil, Trash2, Search } from "lucide-react";
+import { toast } from "sonner";
+
+import { subjectService } from "@/services/subjectService";
+import { collegeService } from "@/services/collegeService";
+import { departmentService } from "@/services/departmentService";
+import { subjectSchema, type SubjectFormValues } from "@/schemas";
+import { mapServerError } from "@/lib/formErrors";
+import type { Subject } from "@/types/subject";
+import type { College } from "@/types/college";
+import type { Department } from "@/types/department";
+
+import { Gate } from "@/components/Gate";
+import { DataTable, type Column } from "@/components/ui/DataTable";
+import { Button } from "@/components/ui/Button";
+import { Dialog } from "@/components/ui/Dialog";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
+import { FormField, inputClass, selectClass } from "@/components/ui/FormField";
+
+export default function SubjectsPage() {
+  const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [colleges, setColleges] = useState<College[]>([]);
+  const [departments, setDepartments] = useState<Department[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalItems, setTotalItems] = useState(0);
+  const [keyword, setKeyword] = useState("");
+  const pageSize = 10;
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editing, setEditing] = useState<Subject | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Subject | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  // ── Fetch ─────────────────────────────────────────────
+  const fetchSubjects = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = keyword.trim()
+        ? await subjectService.search({ keyword: keyword.trim() })
+        : await subjectService.getAll({ page: page - 1, size: pageSize });
+      const data = res.data?.data;
+      setSubjects(data?.content ?? []);
+      setTotalItems(data?.totalElements ?? 0);
+    } catch {
+      toast.error("Failed to load subjects");
+    } finally {
+      setLoading(false);
+    }
+  }, [page, keyword]);
+
+  useEffect(() => { void fetchSubjects(); }, [fetchSubjects]);
+
+  useEffect(() => {
+    collegeService.getAll({ page: 0, size: 200 })
+      .then((res) => setColleges(res.data?.data?.content ?? []))
+      .catch(() => {});
+  }, []);
+
+  // ── Form ──────────────────────────────────────────────
+  const form = useForm<SubjectFormValues>({
+    resolver: zodResolver(subjectSchema),
+  });
+  const { register, handleSubmit, reset, setError, setValue, control, formState: { errors, isSubmitting } } = form;
+
+  const selectedCollegeId = useWatch({ control, name: "collegeId" });
+
+  // Cascade: load departments when college changes
+  useEffect(() => {
+    if (!selectedCollegeId || selectedCollegeId <= 0) {
+      setDepartments([]);
+      return;
+    }
+    departmentService.getByCollege(selectedCollegeId)
+      .then((res) => setDepartments(res.data?.data ?? []))
+      .catch(() => setDepartments([]));
+  }, [selectedCollegeId]);
+
+  const openCreate = () => {
+    setEditing(null);
+    reset({ subjectName: "", subjectCode: "", collegeId: 0, departmentId: 0 });
+    setDialogOpen(true);
+  };
+
+  const openEdit = (subj: Subject) => {
+    setEditing(subj);
+    reset({
+      subjectName: subj.subjectName,
+      subjectCode: subj.subjectCode,
+      collegeId: subj.collegeId ?? 0,
+      departmentId: subj.departmentId ?? 0,
+    });
+    // Pre-load departments for the edit college
+    if (subj.collegeId) {
+      departmentService.getByCollege(subj.collegeId)
+        .then((res) => setDepartments(res.data?.data ?? []))
+        .catch(() => {});
+    }
+    setDialogOpen(true);
+  };
+
+  const onSubmit = async (values: SubjectFormValues) => {
+    try {
+      if (editing) {
+        await subjectService.update(editing.subjectId, values);
+        toast.success("Subject updated");
+      } else {
+        await subjectService.create(values);
+        toast.success("Subject created");
+      }
+      setDialogOpen(false);
+      void fetchSubjects();
+    } catch (err) {
+      if (!mapServerError(err, setError)) {
+        toast.error(err instanceof Error ? err.message : "Operation failed");
+      }
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await subjectService.delete(deleteTarget.subjectId);
+      toast.success("Subject deleted");
+      setDeleteTarget(null);
+      void fetchSubjects();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Delete failed");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const onSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    setPage(1);
+    void fetchSubjects();
+  };
+
+  // ── Columns ───────────────────────────────────────────
+  const columns: Column<Subject>[] = [
+    { key: "subjectId", header: "ID", className: "w-20" },
+    { key: "subjectCode", header: "Code", className: "w-28" },
+    { key: "subjectName", header: "Subject Name" },
+    {
+      key: "departmentName",
+      header: "Department",
+      render: (row) => <span className="text-muted-foreground">{row.departmentName ?? "—"}</span>,
+    },
+    {
+      key: "collegeName",
+      header: "College",
+      render: (row) => <span className="text-muted-foreground">{row.collegeName ?? "—"}</span>,
+    },
+    {
+      key: "actions",
+      header: "Actions",
+      className: "w-32 text-right",
+      render: (row) => (
+        <div className="flex justify-end gap-1">
+          <Gate permission="SUBJECT_UPDATE">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openEdit(row); }}
+              className="rounded-lg p-1.5 text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+              title="Edit"
+            >
+              <Pencil className="h-4 w-4" />
+            </button>
+          </Gate>
+          <Gate permission="SUBJECT_DELETE">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setDeleteTarget(row); }}
+              className="rounded-lg p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+              title="Delete"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </Gate>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <Gate permission="SUBJECT_READ" fallback={<p className="text-muted-foreground p-8">Access denied.</p>}>
+      <div className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <h1 className="text-2xl font-bold text-foreground">Subjects</h1>
+          <Gate permission="SUBJECT_CREATE">
+            <Button onClick={openCreate} size="sm">
+              <Plus className="h-4 w-4 mr-2" /> Add Subject
+            </Button>
+          </Gate>
+        </div>
+
+        <form onSubmit={onSearch} className="flex gap-2 max-w-sm">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <input
+              type="text"
+              placeholder="Search subjects..."
+              value={keyword}
+              onChange={(e) => setKeyword(e.target.value)}
+              className={`${inputClass} pl-9`}
+            />
+          </div>
+          <Button type="submit" size="sm" variant="secondary">Search</Button>
+        </form>
+
+        <DataTable
+          columns={columns}
+          data={subjects}
+          rowKey={(r) => r.subjectId}
+          loading={loading}
+          totalItems={totalItems}
+          page={page}
+          pageSize={pageSize}
+          onPageChange={setPage}
+          emptyMessage="No subjects found."
+        />
+
+        {/* Create / Edit Dialog */}
+        <Dialog
+          open={dialogOpen}
+          onClose={() => setDialogOpen(false)}
+          title={editing ? "Edit Subject" : "Add Subject"}
+        >
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <FormField label="Subject Name" error={errors.subjectName?.message}>
+              <input {...register("subjectName")} className={inputClass} placeholder="e.g. Data Structures" autoFocus />
+            </FormField>
+            <FormField label="Subject Code" error={errors.subjectCode?.message}>
+              <input {...register("subjectCode")} className={inputClass} placeholder="e.g. CS201" />
+            </FormField>
+            <FormField label="College" error={errors.collegeId?.message}>
+              <select
+                {...register("collegeId", { valueAsNumber: true })}
+                className={selectClass}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  setValue("collegeId", v);
+                  setValue("departmentId", 0);
+                }}
+              >
+                <option value={0}>Select college</option>
+                {colleges.map((c) => (
+                  <option key={c.collegeId} value={c.collegeId}>{c.collegeName}</option>
+                ))}
+              </select>
+            </FormField>
+            <FormField label="Department" error={errors.departmentId?.message}>
+              <select {...register("departmentId", { valueAsNumber: true })} className={selectClass} disabled={!selectedCollegeId || selectedCollegeId <= 0}>
+                <option value={0}>Select department</option>
+                {departments.map((d) => (
+                  <option key={d.departmentId} value={d.departmentId}>{d.departmentName}</option>
+                ))}
+              </select>
+            </FormField>
+            <div className="flex justify-end gap-3 pt-2">
+              <Button variant="ghost" onClick={() => setDialogOpen(false)} type="button">Cancel</Button>
+              <Button type="submit" loading={isSubmitting}>{editing ? "Update" : "Create"}</Button>
+            </div>
+          </form>
+        </Dialog>
+
+        <ConfirmDialog
+          open={!!deleteTarget}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={handleDelete}
+          title="Delete Subject"
+          description={`Are you sure you want to delete "${deleteTarget?.subjectName}"? This action cannot be undone.`}
+          loading={deleting}
+        />
+      </div>
+    </Gate>
+  );
+}
